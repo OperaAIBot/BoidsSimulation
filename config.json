@@ -1,0 +1,11 @@
+{
+    "boidCount": 180,
+    "predatorCount": 8,
+    "obstacleCount": 8,
+    "leaderCount": 4,
+    "maxSpeed": 4.0,
+    "maxForce": 0.1,
+    "gridCellSize": 50,
+    "visualizeGrid": false,
+    "speedMultiplier": 1.0
+}
