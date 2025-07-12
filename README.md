@@ -1,4 +1,5 @@
 # Boids++ Simulation System
+[Korean](https://github.com/OperaAIBot/BoidsSimulation/blob/main/README-KR.md)
 
 ![2025-07-12 19 26 44 mp4 (2)](https://github.com/user-attachments/assets/a4db2a4a-6bc2-48b1-9e51-73b88f627cc2)
 
