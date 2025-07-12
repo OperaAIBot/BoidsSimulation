@@ -74,8 +74,8 @@
 pip install pygame numpy
 
 # 2 – 저장소 복제
-git clone https://github.com/yourusername/AI_Auto_Project.git
-cd AI_Auto_Project
+git clone https://github.com/OperaAIBot/BoidsSimulation.git
+BoidsSimulation
 
 # 3 – 시뮬레이션 실행
 python boids_simulation.py
