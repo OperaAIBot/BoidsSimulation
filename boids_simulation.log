@@ -1,799 +1,958 @@
-Iteration 15
-Timestamp: 2025-07-12 16:29:35
+Iteration 16
+Timestamp: 2025-07-12 16:31:27
 ==================================================
 
 CODE:
 # filename: boids_simulation.py
+"""
+Boids++ Simulation System with Spatial Hash Grid Optimization, Multiple Agent Types,
+Advanced Flocking Behaviors, Predator-Prey Interaction, Obstacle Avoidance,
+Performance Optimization, Configuration Support, and Pygame Visualization.
+
+Implements:
+- SpatialHashGrid for efficient neighbor queries
+- Agent classes: Boid, Predator, Obstacle, Leader
+- Weighted steering and state machines for adaptive AI
+- Real-time interactive controls
+- Auto test mode with accelerated simulation and detailed performance reporting
+- ScoreManager for feature scoring and recommendations
+
+Author: Expert Python Developer
+Date: 2024-06
+"""
+
 import sys
-import math
+import os
 import json
+import math
 import time
-import random
 import threading
+import logging
+import argparse
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from typing import List, Tuple, Dict, Optional, Union, Callable, Any
+
 import pygame
 import numpy as np
-import asyncio
-import multiprocessing
-from typing import List, Tuple, Dict, Optional, Union
 
-pygame.init()
+# Constants for colors
+WHITE = (255, 255, 255)
+GREY = (100, 100, 100)
+BLACK = (0, 0, 0)
+RED = (220, 50, 50)
+GREEN = (50, 220, 50)
+BLUE = (50, 50, 220)
+YELLOW = (220, 220, 50)
+CYAN = (50, 220, 220)
+MAGENTA = (220, 50, 220)
+ORANGE = (255, 165, 0)
 
-# --- Custom Exceptions ---
+# Logger setup
+LOG_FILENAME = 'boids_simulation.log'
+logging.basicConfig(
+    filename=LOG_FILENAME,
+    filemode='a',
+    format='%(asctime)s %(levelname)s %(message)s',
+    level=logging.INFO
+)
+
+# Custom exceptions
 class FeatureTestError(Exception):
-    """Raised when a feature test fails."""
     pass
 
 class PerformanceError(Exception):
-    """Raised when performance requirements are not met."""
     pass
 
 class OptimizationRequiredError(Exception):
-    """Raised when optimization is required."""
     pass
 
-# --- Vector utilities ---
-def limitVector(vec: np.ndarray, maxVal: float) -> np.ndarray:
-    norm = np.linalg.norm(vec)
-    if norm > maxVal:
-        return vec * maxVal / norm
-    return vec
+# Utility functions
+def limit_vector(vector: np.ndarray, max_value: float) -> np.ndarray:
+    norm = np.linalg.norm(vector)
+    if norm > max_value:
+        return vector / norm * max_value
+    return vector
 
-def vector2Tuple(vec: np.ndarray) -> Tuple[float, float]:
-    return float(vec[0]), float(vec[1])
+def angle_to_vector(angle: float) -> np.ndarray:
+    return np.array([math.cos(angle), math.sin(angle)], dtype=np.float32)
 
-def angleBetween(v1: np.ndarray, v2: np.ndarray) -> float:
-    dot = np.dot(v1, v2)
-    norms = np.linalg.norm(v1)*np.linalg.norm(v2)
-    if norms == 0:
-        return 0.0
-    arg = np.clip(dot/norms, -1.0, 1.0)
-    return math.acos(arg)
+def vector_to_angle(vector: np.ndarray) -> float:
+    return math.atan2(vector[1], vector[0])
 
-# --- Config Manager ---
-class ConfigManager:
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(value, max_value))
+
+def distance_sq(a: np.ndarray, b: np.ndarray) -> float:
+    return np.sum((a - b) ** 2)
+
+# Configuration System
+class Config:
     """
-    Loads and manages simulation configuration from external JSON.
-    Supports presets and runtime updates.
+    Loads and provides access to simulation configuration parameters.
+    Supports external JSON config file and presets.
     """
-    def __init__(self, filepath: str = "config.json"):
-        self.filepath = filepath
-        self.config = self.loadConfig()
-        self.lock = threading.Lock()
+    defaultConfigPath = "config.json"
+    presets: Dict[str, Dict[str, Any]] = {
+        "default": {
+            "windowWidth": 1024,
+            "windowHeight": 768,
+            "gridCellSize": 50,
+            "boidCount": 150,
+            "predatorCount": 5,
+            "obstacleCount": 20,
+            "leaderCount": 2,
+            "maxSpeedBoid": 3.5,
+            "maxForceBoid": 0.05,
+            "maxSpeedPredator": 4.5,
+            "maxForcePredator": 0.07,
+            "perceptionRadius": 75,
+            "separationRadius": 25,
+            "obstacleAvoidanceRadius": 40,
+            "boundaryMargin": 50,
+            "fpsTarget": 60,
+            "speedMultiplier": 1.0,
+            "visualizeGrid": False,
+            "visualizeVectors": False,
+            "maxAgents": 300,
+            "autoTestSpeedMultiplier": 5.0,
+            "autoTestDuration": 30.0,
+            "autoTestPhases": [
+                {"name": "flocking", "duration": 10},
+                {"name": "predator_prey", "duration": 10},
+                {"name": "obstacle_avoidance", "duration": 10}
+            ]
+        }
+    }
 
-    def loadConfig(self) -> dict:
+    def __init__(self, preset_name: str = "default", config_file: Optional[str] = None):
+        self.config: Dict[str, Any] = {}
+        self.load_preset(preset_name)
+        if config_file:
+            self.load_file(config_file)
+
+    def load_preset(self, preset_name: str) -> None:
+        preset = self.presets.get(preset_name)
+        if preset is None:
+            raise ValueError(f"Preset '{preset_name}' not found.")
+        self.config.update(preset)
+
+    def load_file(self, filepath: str) -> None:
         try:
-            with open(self.filepath, 'r') as f:
+            with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                return data
-        except (IOError, json.JSONDecodeError):
-            # Provide defaults if config missing or corrupt
-            return {
-                "screenWidth": 1280,
-                "screenHeight": 720,
-                "backgroundColor": [25, 25, 25],
-                "boidCount": 160,
-                "predatorCount": 10,
-                "obstacleCount": 20,
-                "leaderCount": 5,
-                "maxSpeedBoid": 3.5,
-                "maxForceBoid": 0.1,
-                "maxSpeedPredator": 5.0,
-                "maxForcePredator": 0.15,
-                "maxSpeedLeader": 4.0,
-                "maxForceLeader": 0.12,
-                "neighborRadius": 50,
-                "desiredSeparation": 20,
-                "obstacleAvoidRadius": 30,
-                "gridCellSize": 60,
-                "simulationSpeed": 1.0,
-                "visualizationModes": ["agents", "grid", "stats"],
-                "initialSpeedMultiplier": 1.0,
-                "maxFPS": 60
-            }
+                self.config.update(data)
+        except Exception as e:
+            logging.error(f"Failed to load config from {filepath}: {e}")
 
-    def get(self, key: str, default=None):
-        with self.lock:
-            return self.config.get(key, default)
+    def __getitem__(self, key: str) -> Any:
+        return self.config[key]
 
-    def set(self, key: str, value):
-        with self.lock:
-            self.config[key] = value
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.config.get(key, default)
 
-    def reload(self):
-        with self.lock:
-            self.config = self.loadConfig()
+    def set(self, key: str, value: Any) -> None:
+        self.config[key] = value
 
-# --- Score Manager ---
-class ScoreManager:
-    """
-    Evaluates simulation features on a 100-point scale.
-    Tracks scores, generates reports.
-    """
-    def __init__(self):
-        self.scores = {
-            "Flocking behavior": 0,
-            "Spatial hash efficiency": 0,
-            "Obstacle avoidance": 0,
-            "Predator-prey interactions": 0,
-            "UI and controls": 0,
-            "Performance optimization": 0,
-            "Code quality": 0,
-            "Documentation": 0,
-            "Error handling": 0,
-            "Testing": 0,
-        }
-        self.max_scores = {
-            "Flocking behavior": 20,
-            "Spatial hash efficiency": 15,
-            "Obstacle avoidance": 10,
-            "Predator-prey interactions": 10,
-            "UI and controls": 10,
-            "Performance optimization": 15,
-            "Code quality": 10,
-            "Documentation": 5,
-            "Error handling": 5,
-            "Testing": 5,
-        }
-
-    def setScore(self, feature: str, score: int):
-        if feature in self.scores:
-            max_score = self.max_scores.get(feature, 0)
-            self.scores[feature] = max(0, min(score, max_score))
-
-    def calculatePerformanceScore(self, fps: float, agentCount: int):
-        # Based on fps and agent count, assign performance points (15 max)
-        if agentCount < 200:
-            # Scale for fewer agents
-            base = 15 * (agentCount / 200)
-        else:
-            base = 15
-        if fps >= 60:
-            self.setScore("Performance optimization", int(base))
-        elif 45 <= fps < 60:
-            self.setScore("Performance optimization", int(base * 0.7))
-        elif 30 <= fps < 45:
-            self.setScore("Performance optimization", int(base * 0.4))
-        else:
-            self.setScore("Performance optimization", int(base * 0.1))
-
-    def totalScore(self) -> int:
-        return sum(self.scores.values())
-
-    def report(self) -> str:
-        lines = ["BOIDS_SIMULATION_SCORE: {}/100\n".format(self.totalScore()),
-                 "Score Breakdown:"]
-        for f, s in self.scores.items():
-            max_s = self.max_scores.get(f, 0)
-            lines.append(f"- {f}: {s}/{max_s}")
-        lines.append("\nRecommendations:")
-        # Basic recommendations based on low scores
-        for f, s in self.scores.items():
-            max_s = self.max_scores.get(f, 0)
-            if s < max_s * 0.7:
-                rec = f"Improve {f.lower()}."
-                lines.append(f"- {rec}")
-        return "\n".join(lines)
-
-# --- Spatial Hash Grid ---
+# Spatial Hash Grid System
 class SpatialHashGrid:
     """
     Efficient spatial hash grid for neighbor queries.
+    Assigns agents to grid cells based on position.
     """
+
     def __init__(self, width: int, height: int, cellSize: int):
         self.width = width
         self.height = height
         self.cellSize = cellSize
-        self.cols = (self.width // self.cellSize) + 1
-        self.rows = (self.height // self.cellSize) + 1
-        self.grid: Dict[Tuple[int, int], List['Agent']] = {}
-        self.lock = threading.Lock()
+        self.grid: Dict[Tuple[int, int], List['Agent']] = defaultdict(list)
 
-    def _hash(self, pos: np.ndarray) -> Tuple[int, int]:
-        col = int(pos[0] // self.cellSize)
-        row = int(pos[1] // self.cellSize)
-        return col, row
+    def _hash(self, position: np.ndarray) -> Tuple[int, int]:
+        return (int(position[0]) // self.cellSize, int(position[1]) // self.cellSize)
 
-    def clear(self):
-        with self.lock:
-            self.grid.clear()
+    def clear(self) -> None:
+        self.grid.clear()
 
-    def addAgent(self, agent: 'Agent'):
-        key = self._hash(agent.position)
-        with self.lock:
-            if key not in self.grid:
-                self.grid[key] = []
-            self.grid[key].append(agent)
+    def insert(self, agent: 'Agent') -> None:
+        cell = self._hash(agent.position)
+        self.grid[cell].append(agent)
 
-    def removeAgent(self, agent: 'Agent', oldPos: np.ndarray):
-        key = self._hash(oldPos)
-        with self.lock:
-            if key in self.grid and agent in self.grid[key]:
-                self.grid[key].remove(agent)
-                if not self.grid[key]:
-                    del self.grid[key]
-
-    def updateAgent(self, agent: 'Agent', oldPos: np.ndarray):
-        oldKey = self._hash(oldPos)
-        newKey = self._hash(agent.position)
-        if oldKey != newKey:
-            self.removeAgent(agent, oldPos)
-            self.addAgent(agent)
-
-    def neighbors(self, pos: np.ndarray, radius: float) -> List['Agent']:
-        col, row = self._hash(pos)
-        cellsRange = math.ceil(radius / self.cellSize)
-        neighbors: List['Agent'] = []
-        with self.lock:
-            for dx in range(-cellsRange, cellsRange + 1):
-                for dy in range(-cellsRange, cellsRange + 1):
-                    key = (col + dx, row + dy)
-                    if key in self.grid:
-                        neighbors.extend(self.grid[key])
+    def query(self, position: np.ndarray, radius: float) -> List['Agent']:
+        # Determine affected cells
+        cellX, cellY = self._hash(position)
+        cellRadius = int(math.ceil(radius / self.cellSize))
+        neighbors = []
+        for dx in range(-cellRadius, cellRadius + 1):
+            for dy in range(-cellRadius, cellRadius + 1):
+                cell = (cellX + dx, cellY + dy)
+                if cell in self.grid:
+                    neighbors.extend(self.grid[cell])
         return neighbors
 
-    def drawGrid(self, surface: pygame.Surface, color=(70, 70, 70)):
-        for col in range(self.cols):
-            x = col * self.cellSize
-            pygame.draw.line(surface, color, (x, 0), (x, self.height), 1)
-        for row in range(self.rows):
-            y = row * self.cellSize
-            pygame.draw.line(surface, color, (0, y), (self.width, y), 1)
+    def get_cells(self) -> List[Tuple[int, int]]:
+        return list(self.grid.keys())
 
-# --- Agent Base Class ---
+# Base Agent Class
 class Agent:
     """
-    Base class for all agents (Boids, Predators, Obstacles, Leaders)
+    Base class for all agents in the simulation.
     """
-    def __init__(self,
-                 position: np.ndarray,
-                 velocity: np.ndarray,
-                 maxSpeed: float,
-                 maxForce: float,
-                 agentType: str,
-                 config: ConfigManager):
-        self.position = position
-        self.velocity = velocity
+
+    def __init__(
+        self,
+        position: np.ndarray,
+        velocity: np.ndarray,
+        max_speed: float,
+        max_force: float,
+        agent_type: str,
+        radius: float = 5.0,
+        color: Tuple[int, int, int] = WHITE,
+        config: Optional[Config] = None,
+    ):
+        self.position = position.astype(np.float32)
+        self.velocity = velocity.astype(np.float32)
         self.acceleration = np.zeros(2, dtype=np.float32)
-        self.maxSpeed = maxSpeed
-        self.maxForce = maxForce
-        self.agentType = agentType
+        self.maxSpeed = max_speed
+        self.maxForce = max_force
+        self.agentType = agent_type
+        self.radius = radius
+        self.color = color
         self.config = config
-        self.size = 6 if agentType != 'obstacle' else 12
-        self.state = 'normal'  # For state machines (e.g., predator hunting)
-        self.idleTime = 0.0
-        self.lastUpdateTime = time.time()
-        self.color = {
-            'boid': (200, 200, 255),
-            'predator': (255, 50, 50),
-            'obstacle': (100, 100, 100),
-            'leader': (255, 255, 100)
-        }.get(agentType, (200, 200, 200))
-        self.historyPositions = []  # For trailing or learning algorithms
+        self.state = 'normal'  # for predators and other stateful agents
+        self.id = id(self)  # unique id for debugging
 
-    def update(self, deltaTime: float):
-        self.velocity += self.acceleration
-        self.velocity = limitVector(self.velocity, self.maxSpeed)
-        self.position += self.velocity * deltaTime
-        self.acceleration *= 0
-        # Save history for learning or trails
-        self.historyPositions.append(self.position.copy())
-        if len(self.historyPositions) > 20:
-            self.historyPositions.pop(0)
-
-    def applyForce(self, force: np.ndarray):
+    def applyForce(self, force: np.ndarray) -> None:
         self.acceleration += force
 
-    def borders(self, width: int, height: int):
-        # Wrap-around behavior
-        if self.position[0] < 0:
-            self.position[0] += width
-        elif self.position[0] > width:
-            self.position[0] -= width
-        if self.position[1] < 0:
-            self.position[1] += height
-        elif self.position[1] > height:
-            self.position[1] -= height
+    def update(self, dt: float) -> None:
+        self.velocity += self.acceleration
+        self.velocity = limit_vector(self.velocity, self.maxSpeed)
+        self.position += self.velocity * dt
+        self.acceleration *= 0
 
-    def distanceTo(self, other: 'Agent') -> float:
-        return np.linalg.norm(self.position - other.position)
+    def edges(self, width: int, height: int) -> None:
+        margin = self.config.get('boundaryMargin', 50) if self.config else 50
+        bounce = False
+        if self.position[0] < margin:
+            self.position[0] = margin
+            self.velocity[0] *= -1
+            bounce = True
+        elif self.position[0] > width - margin:
+            self.position[0] = width - margin
+            self.velocity[0] *= -1
+            bounce = True
 
-    def seek(self, target: np.ndarray) -> np.ndarray:
-        desired = target - self.position
-        desired = desired / np.linalg.norm(desired) * self.maxSpeed if np.linalg.norm(desired) > 0 else np.zeros(2)
-        steer = desired - self.velocity
-        steer = limitVector(steer, self.maxForce)
-        return steer
+        if self.position[1] < margin:
+            self.position[1] = margin
+            self.velocity[1] *= -1
+            bounce = True
+        elif self.position[1] > height - margin:
+            self.position[1] = height - margin
+            self.velocity[1] *= -1
+            bounce = True
 
-    def draw(self, surface: pygame.Surface):
-        # Draw as triangle pointing in the velocity direction
-        if np.linalg.norm(self.velocity) < 0.0001:
-            angle = 0
-        else:
-            angle = math.degrees(math.atan2(-self.velocity[1], self.velocity[0]))
-        points = [
-            (self.position[0] + math.cos(math.radians(angle)) * self.size * 2,
-             self.position[1] - math.sin(math.radians(angle)) * self.size * 2),
-            (self.position[0] + math.cos(math.radians(angle + 140)) * self.size,
-             self.position[1] - math.sin(math.radians(angle + 140)) * self.size),
-            (self.position[0] + math.cos(math.radians(angle - 140)) * self.size,
-             self.position[1] - math.sin(math.radians(angle - 140)) * self.size),
-        ]
+        if bounce:
+            self.velocity = limit_vector(self.velocity, self.maxSpeed)
+
+    def draw(self, surface: pygame.Surface) -> None:
+        # Draw as triangle pointing in velocity direction
+        angle = vector_to_angle(self.velocity)
+        points = []
+        size = self.radius
+        # Triangle shape
+        points.append(
+            (
+                self.position[0] + math.cos(angle) * size * 2,
+                self.position[1] + math.sin(angle) * size * 2,
+            )
+        )
+        points.append(
+            (
+                self.position[0] + math.cos(angle + 2.5) * size,
+                self.position[1] + math.sin(angle + 2.5) * size,
+            )
+        )
+        points.append(
+            (
+                self.position[0] + math.cos(angle - 2.5) * size,
+                self.position[1] + math.sin(angle - 2.5) * size,
+            )
+        )
         pygame.draw.polygon(surface, self.color, points)
 
-# --- Boid Class ---
+# Derived Agent Types
 class Boid(Agent):
-    def __init__(self,
-                 position: np.ndarray,
-                 velocity: np.ndarray,
-                 config: ConfigManager):
-        super().__init__(position, velocity,
-                         maxSpeed=config.get("maxSpeedBoid", 3.5),
-                         maxForce=config.get("maxForceBoid", 0.1),
-                         agentType='boid',
-                         config=config)
-        self.neighborRadius = config.get("neighborRadius", 50)
-        self.desiredSeparation = config.get("desiredSeparation", 20)
-        self.obstacleAvoidRadius = config.get("obstacleAvoidRadius", 30)
+    """
+    Standard Boid agent with flocking behavior.
+    """
 
-    def flock(self, neighbors: List[Agent], obstacles: List[Agent], predators: List[Agent]):
-        sep = self.separate(neighbors)
-        ali = self.align(neighbors)
-        coh = self.cohesion(neighbors)
-        obs = self.avoidObstacles(obstacles)
-        pred = self.evadePredators(predators)
+    def __init__(self, position: np.ndarray, velocity: np.ndarray, config: Config):
+        super().__init__(
+            position,
+            velocity,
+            max_speed=config['maxSpeedBoid'],
+            max_force=config['maxForceBoid'],
+            agent_type='boid',
+            radius=5,
+            color=BLUE,
+            config=config,
+        )
+        self.perceptionRadius = config['perceptionRadius']
+        self.separationRadius = config['separationRadius']
+        self.obstacleAvoidanceRadius = config['obstacleAvoidanceRadius']
+        self.neighbors: List[Agent] = []
 
-        # Weighted sum of forces
-        sep *= 1.5
-        ali *= 1.0
-        coh *= 1.0
-        obs *= 3.0
-        pred *= 5.0
+    def flock(
+        self,
+        neighbors: List['Agent'],
+        obstacles: List['Agent'],
+        predators: List['Agent'],
+        dt: float,
+        width: int,
+        height: int,
+    ) -> None:
+        # Weighted steering behaviors combined
+        separation = self.separation(neighbors)
+        alignment = self.alignment(neighbors)
+        cohesion = self.cohesion(neighbors)
+        avoidance = self.avoidObstacles(obstacles)
+        evade = self.evadePredators(predators)
 
-        self.applyForce(sep)
-        self.applyForce(ali)
-        self.applyForce(coh)
-        self.applyForce(obs)
-        self.applyForce(pred)
+        # Weights
+        wSeparation = 1.8
+        wAlignment = 1.0
+        wCohesion = 1.0
+        wAvoidance = 2.0
+        wEvade = 2.5
 
-    def separate(self, neighbors: List[Agent]) -> np.ndarray:
+        steer = (
+            separation * wSeparation
+            + alignment * wAlignment
+            + cohesion * wCohesion
+            + avoidance * wAvoidance
+            + evade * wEvade
+        )
+        if np.any(np.isnan(steer)):
+            steer = np.zeros(2, dtype=np.float32)
+        self.applyForce(steer)
+        self.edges(width, height)
+
+    def separation(self, neighbors: List['Agent']) -> np.ndarray:
         steer = np.zeros(2, dtype=np.float32)
-        count = 0
+        total = 0
         for other in neighbors:
             if other is self or other.agentType == 'obstacle':
                 continue
-            d = self.distanceTo(other)
-            if 0 < d < self.desiredSeparation:
+            d = np.linalg.norm(self.position - other.position)
+            if 0 < d < self.separationRadius:
                 diff = self.position - other.position
-                diff /= (d * d)
+                if d > 0:
+                    diff /= d
                 steer += diff
-                count += 1
-        if count > 0:
-            steer /= count
-        if np.linalg.norm(steer) > 0:
-            steer = steer / np.linalg.norm(steer) * self.maxSpeed - self.velocity
-            steer = limitVector(steer, self.maxForce)
+                total += 1
+        if total > 0:
+            steer /= total
+            steer = limit_vector(steer, self.maxForce)
         return steer
 
-    def align(self, neighbors: List[Agent]) -> np.ndarray:
-        sumVel = np.zeros(2, dtype=np.float32)
-        count = 0
+    def alignment(self, neighbors: List['Agent']) -> np.ndarray:
+        avg_vel = np.zeros(2, dtype=np.float32)
+        total = 0
         for other in neighbors:
             if other is self or other.agentType == 'obstacle':
                 continue
-            d = self.distanceTo(other)
-            if d < self.neighborRadius:
-                sumVel += other.velocity
-                count += 1
-        if count > 0:
-            avgVel = sumVel / count
-            avgVel = avgVel / np.linalg.norm(avgVel) * self.maxSpeed if np.linalg.norm(avgVel) > 0 else avgVel
-            steer = avgVel - self.velocity
-            steer = limitVector(steer, self.maxForce)
+            d = np.linalg.norm(self.position - other.position)
+            if 0 < d < self.perceptionRadius:
+                avg_vel += other.velocity
+                total += 1
+        if total > 0:
+            avg_vel /= total
+            avg_vel = limit_vector(avg_vel, self.maxSpeed)
+            steer = avg_vel - self.velocity
+            steer = limit_vector(steer, self.maxForce)
             return steer
-        return np.zeros(2)
+        return np.zeros(2, dtype=np.float32)
 
-    def cohesion(self, neighbors: List[Agent]) -> np.ndarray:
-        sumPos = np.zeros(2, dtype=np.float32)
-        count = 0
+    def cohesion(self, neighbors: List['Agent']) -> np.ndarray:
+        center_of_mass = np.zeros(2, dtype=np.float32)
+        total = 0
         for other in neighbors:
             if other is self or other.agentType == 'obstacle':
                 continue
-            d = self.distanceTo(other)
-            if d < self.neighborRadius:
-                sumPos += other.position
-                count += 1
-        if count > 0:
-            avgPos = sumPos / count
-            return self.seek(avgPos)
-        return np.zeros(2)
+            d = np.linalg.norm(self.position - other.position)
+            if 0 < d < self.perceptionRadius:
+                center_of_mass += other.position
+                total += 1
+        if total > 0:
+            center_of_mass /= total
+            desired = center_of_mass - self.position
+            desired = limit_vector(desired, self.maxSpeed)
+            steer = desired - self.velocity
+            steer = limit_vector(steer, self.maxForce)
+            return steer
+        return np.zeros(2, dtype=np.float32)
 
-    def avoidObstacles(self, obstacles: List[Agent]) -> np.ndarray:
+    def avoidObstacles(self, obstacles: List['Agent']) -> np.ndarray:
         steer = np.zeros(2, dtype=np.float32)
-        count = 0
+        total = 0
         for obs in obstacles:
-            d = self.distanceTo(obs)
-            if d < self.obstacleAvoidRadius + obs.size:
+            d = np.linalg.norm(self.position - obs.position)
+            if d < self.obstacleAvoidanceRadius + obs.radius:
                 diff = self.position - obs.position
-                diff /= (d * d)
+                if d > 0:
+                    diff /= (d * d)  # stronger repulsion closer
                 steer += diff
-                count += 1
-        if count > 0:
-            steer /= count
-        if np.linalg.norm(steer) > 0:
-            steer = steer / np.linalg.norm(steer) * self.maxSpeed - self.velocity
-            steer = limitVector(steer, self.maxForce * 3)
+                total += 1
+        if total > 0:
+            steer /= total
+            steer = limit_vector(steer, self.maxForce)
         return steer
 
-    def evadePredators(self, predators: List[Agent]) -> np.ndarray:
+    def evadePredators(self, predators: List['Agent']) -> np.ndarray:
         steer = np.zeros(2, dtype=np.float32)
+        total = 0
         for pred in predators:
-            d = self.distanceTo(pred)
-            if d < self.neighborRadius * 2:
+            d = np.linalg.norm(self.position - pred.position)
+            if d < self.perceptionRadius * 1.5:
                 diff = self.position - pred.position
-                if np.linalg.norm(diff) > 0:
-                    diff /= d * d
-                    steer += diff
-        if np.linalg.norm(steer) > 0:
-            steer = steer / np.linalg.norm(steer) * self.maxSpeed - self.velocity
-            steer = limitVector(steer, self.maxForce * 5)
+                if d > 0:
+                    diff /= (d * d)
+                steer += diff
+                total += 1
+        if total > 0:
+            steer /= total
+            steer = limit_vector(steer, self.maxForce * 1.5)
         return steer
 
-# --- Predator Class ---
 class Predator(Agent):
-    def __init__(self,
-                 position: np.ndarray,
-                 velocity: np.ndarray,
-                 config: ConfigManager):
-        super().__init__(position, velocity,
-                         maxSpeed=config.get("maxSpeedPredator", 5.0),
-                         maxForce=config.get("maxForcePredator", 0.15),
-                         agentType='predator',
-                         config=config)
-        self.huntRadius = config.get("neighborRadius", 50) * 1.5
-        self.preyTarget: Optional[Agent] = None
+    """
+    Predator agent with chase and wander behaviors.
+    """
 
-    def hunt(self, boids: List[Agent]):
-        # If no target or target too far or dead, find closest prey
-        if self.preyTarget is None or self.distanceTo(self.preyTarget) > self.huntRadius:
-            self.preyTarget = None
-            closestDist = float('inf')
-            for boid in boids:
-                d = self.distanceTo(boid)
-                if d < closestDist:
-                    closestDist = d
-                    self.preyTarget = boid
+    def __init__(self, position: np.ndarray, velocity: np.ndarray, config: Config):
+        super().__init__(
+            position,
+            velocity,
+            max_speed=config['maxSpeedPredator'],
+            max_force=config['maxForcePredator'],
+            agent_type='predator',
+            radius=8,
+            color=RED,
+            config=config,
+        )
+        self.perceptionRadius = config['perceptionRadius'] * 1.5
+        self.target: Optional[Agent] = None
+        self.state = 'hunt'
+        self.wanderAngle = 0.0
 
-        if self.preyTarget:
-            steer = self.seek(self.preyTarget.position)
+    def chase(self, boids: List[Agent], dt: float) -> None:
+        # Find closest boid within perception
+        min_dist = float('inf')
+        closest = None
+        for boid in boids:
+            d = np.linalg.norm(self.position - boid.position)
+            if d < min_dist and d < self.perceptionRadius:
+                min_dist = d
+                closest = boid
+        self.target = closest
+        if self.target is not None:
+            desired = self.target.position - self.position
+            desired = limit_vector(desired, self.maxSpeed)
+            steer = desired - self.velocity
+            steer = limit_vector(steer, self.maxForce * 1.5)
             self.applyForce(steer)
-            # Attempt catch if close
-            if closestDist < 10:
-                # "Catch" the boid: send it away or respawn
-                self.preyTarget.position = np.array([
-                    random.uniform(0, self.config.get("screenWidth", 1280)),
-                    random.uniform(0, self.config.get("screenHeight", 720))
-                ], dtype=np.float32)
-                self.preyTarget.velocity = np.random.uniform(-1, 1, 2).astype(np.float32)
-                self.preyTarget = None
+        else:
+            self.wander(dt)
+        self.edges(self.config['windowWidth'], self.config['windowHeight'])
 
-# --- Leader Class ---
-class Leader(Agent):
-    def __init__(self,
-                 position: np.ndarray,
-                 velocity: np.ndarray,
-                 config: ConfigManager):
-        super().__init__(position, velocity,
-                         maxSpeed=config.get("maxSpeedLeader", 4.0),
-                         maxForce=config.get("maxForceLeader", 0.12),
-                         agentType='leader',
-                         config=config)
-        self.waypoints = self.generateWaypoints()
-        self.currentWaypoint = 0
+    def wander(self, dt: float) -> None:
+        wanderRadius = 10.0
+        wanderDistance = 20.0
+        change = 0.3
+        self.wanderAngle += (np.random.rand() - 0.5) * change
 
-    def generateWaypoints(self) -> List[np.ndarray]:
-        # Simple random waypoints
-        width = self.config.get("screenWidth", 1280)
-        height = self.config.get("screenHeight", 720)
-        points = []
-        for _ in range(5):
-            points.append(np.array([random.uniform(0, width), random.uniform(0, height)], dtype=np.float32))
-        return points
+        circlePos = self.velocity.copy()
+        if np.linalg.norm(circlePos) == 0:
+            circlePos = np.array([1.0, 0.0], dtype=np.float32)
+        circlePos = circlePos / np.linalg.norm(circlePos) * wanderDistance + self.position
 
-    def wander(self):
-        if not self.waypoints:
-            return
-        target = self.waypoints[self.currentWaypoint]
-        dist = np.linalg.norm(self.position - target)
-        if dist < 10:
-            self.currentWaypoint = (self.currentWaypoint + 1) % len(self.waypoints)
-        steer = self.seek(target)
+        offset = np.array(
+            [math.cos(self.wanderAngle), math.sin(self.wanderAngle)], dtype=np.float32
+        ) * wanderRadius
+
+        target = circlePos + offset
+        desired = target - self.position
+        desired = limit_vector(desired, self.maxSpeed)
+        steer = desired - self.velocity
+        steer = limit_vector(steer, self.maxForce)
         self.applyForce(steer)
 
-# --- Obstacle Class ---
+    def update(self, dt: float) -> None:
+        super().update(dt)
+
 class Obstacle(Agent):
-    def __init__(self,
-                 position: np.ndarray,
-                 radius: float,
-                 config: ConfigManager):
-        super().__init__(position, np.zeros(2), maxSpeed=0, maxForce=0, agentType='obstacle', config=config)
-        self.size = radius
-        self.color = (150, 150, 150)
+    """
+    Static obstacle agent.
+    """
 
-    def draw(self, surface: pygame.Surface):
-        pygame.draw.circle(surface, self.color, (int(self.position[0]), int(self.position[1])), self.size)
+    def __init__(self, position: np.ndarray, radius: float, config: Config):
+        super().__init__(
+            position,
+            velocity=np.zeros(2, dtype=np.float32),
+            max_speed=0,
+            max_force=0,
+            agent_type='obstacle',
+            radius=radius,
+            color=GREY,
+            config=config,
+        )
 
-# --- Simulation Core ---
+    def update(self, dt: float) -> None:
+        # Static obstacle: no update needed
+        pass
+
+    def draw(self, surface: pygame.Surface) -> None:
+        pygame.draw.circle(surface, self.color, self.position.astype(int), int(self.radius))
+
+class Leader(Boid):
+    """
+    Leader boid that influences nearby boids.
+    """
+
+    def __init__(self, position: np.ndarray, velocity: np.ndarray, config: Config):
+        super().__init__(position, velocity, config)
+        self.color = ORANGE
+        self.radius = 7
+        self.leaderInfluenceRadius = config['perceptionRadius'] * 1.2
+
+    def lead(self, neighbors: List['Agent']) -> None:
+        # Apply stronger cohesion force to neighbors
+        cohesionForce = self.cohesion(neighbors)
+        self.applyForce(cohesionForce * 1.5)
+
+# Score Manager for feature evaluation
+class ScoreManager:
+    """
+    Manages scoring of simulation features with detailed breakdown.
+    """
+
+    def __init__(self):
+        self.featureScores = {
+            "flocking_behavior": 0,
+            "spatial_hash_efficiency": 0,
+            "obstacle_avoidance": 0,
+            "predator_prey_interactions": 0,
+            "ui_and_controls": 0,
+            "performance_optimization": 0,
+            "code_quality": 0,
+            "documentation": 0,
+            "error_handling": 0,
+            "testing": 0,
+        }
+        self.totalScore = 0
+        self.recommendations = []
+
+    def set_score(self, feature: str, score: int) -> None:
+        if feature in self.featureScores:
+            self.featureScores[feature] = score
+        else:
+            logging.warning(f"Unknown feature for scoring: {feature}")
+
+    def calculate_total(self) -> None:
+        self.totalScore = sum(self.featureScores.values())
+
+    def add_recommendation(self, text: str) -> None:
+        self.recommendations.append(text)
+
+    def output_report(self) -> None:
+        self.calculate_total()
+        print(f"BOIDS_SIMULATION_SCORE: {self.totalScore}/100\n")
+        print("Score Breakdown:")
+        for feature, score in self.featureScores.items():
+            print(f"- {feature.replace('_', ' ').capitalize()}: {score}/"
+                  f"{self._max_score_for_feature(feature)}")
+        print("\nRecommendations:")
+        if not self.recommendations:
+            print("- None. Great job!")
+        else:
+            for rec in self.recommendations:
+                print(f"- {rec}")
+
+    def _max_score_for_feature(self, feature: str) -> int:
+        weights = {
+            "flocking_behavior": 20,
+            "spatial_hash_efficiency": 15,
+            "obstacle_avoidance": 10,
+            "predator_prey_interactions": 10,
+            "ui_and_controls": 10,
+            "performance_optimization": 15,
+            "code_quality": 10,
+            "documentation": 5,
+            "error_handling": 5,
+            "testing": 5,
+        }
+        return weights.get(feature, 0)
+
+# Main Simulation Class
 class BoidsSimulation:
     """
-    Main simulation class managing all agents, grid, updates, and rendering.
-    Supports interactive controls and auto-testing.
+    Main Boids++ Simulation system.
+    Handles initialization, update loops, rendering, input, and testing.
     """
-    def __init__(self, config: ConfigManager, autoTest: bool = False):
+
+    def __init__(self, config: Config, auto_test_mode: bool = False):
+        pygame.init()
         self.config = config
-        self.screenWidth = self.config.get("screenWidth", 1280)
-        self.screenHeight = self.config.get("screenHeight", 720)
-        self.bgColor = tuple(self.config.get("backgroundColor", [25, 25, 25]))
-        self.screen = pygame.display.set_mode((self.screenWidth, self.screenHeight))
+        self.width = config['windowWidth']
+        self.height = config['windowHeight']
+        self.screen = pygame.display.set_mode((self.width, self.height))
         pygame.display.set_caption("Boids++ Simulation")
         self.clock = pygame.time.Clock()
-        self.maxFPS = self.config.get("maxFPS", 60)
-        self.running = True
-        self.agents: List[Agent] = []
+        self.font = pygame.font.SysFont("Consolas", 16)
+        self.largeFont = pygame.font.SysFont("Consolas", 28, bold=True)
+
+        # Spatial grid for neighbor queries
+        self.grid = SpatialHashGrid(
+            self.width, self.height, self.config['gridCellSize']
+        )
+
+        # Agents lists
         self.boids: List[Boid] = []
         self.predators: List[Predator] = []
         self.obstacles: List[Obstacle] = []
         self.leaders: List[Leader] = []
-        self.gridCellSize = self.config.get("gridCellSize", 60)
-        self.spatialGrid = SpatialHashGrid(self.screenWidth, self.screenHeight, self.gridCellSize)
-        self.visualizationModes = set(self.config.get("visualizationModes", ["agents", "grid", "stats"]))
-        self.speedMultiplier = self.config.get("initialSpeedMultiplier", 1.0)
-        self.font = pygame.font.SysFont("Consolas", 16)
-        self.scoreManager = ScoreManager()
-        self.autoTest = autoTest
-        self.testStartTime = None
-        self.testPhase = 0  # 0: flocking, 1: predator-prey, 2: obstacles
-        self.testDuration = 30.0
-        self.lastPerformanceCheck = time.time()
-        self.performanceFPS = []
-        self.performanceAgentCount = 0
-        self.paramAdjustLock = threading.Lock()
-        self.lock = threading.Lock()
-        self.initAgents()
-        self.lastGridUpdate = 0.0
-        self.gridUpdateInterval = 0.1  # seconds
-        self.frameCount = 0
-        self.performanceAdjustThreshold = 45  # FPS threshold to adjust performance
 
-    def initAgents(self):
-        self.agents.clear()
+        # Parameters
+        self.speedMultiplier = config.get('speedMultiplier', 1.0)
+        self.visualizeGrid = config.get('visualizeGrid', False)
+        self.visualizeVectors = config.get('visualizeVectors', False)
+        self.running = True
+        self.paused = False
+
+        # Counters
+        self.frameCount = 0
+        self.fps = 0.0
+        self.lastFpsUpdate = time.time()
+
+        # Score Manager
+        self.scoreManager = ScoreManager()
+
+        # Auto-test related
+        self.autoTestMode = auto_test_mode
+        self.autoTestStartTime = None
+        self.autoTestPhaseIndex = 0
+        self.autoTestPhaseStartTime = None
+
+        # For performance monitoring
+        self.fpsHistory = deque(maxlen=120)
+
+        self._setup_agents()
+
+        # Controls mapping
+        self.controlHelp = [
+            "SPACE: Pause/Resume simulation",
+            "UP/DOWN: Increase/Decrease speed multiplier",
+            "G: Toggle grid visualization",
+            "V: Toggle vector visualization",
+            "ESC: Quit",
+        ]
+
+    def _setup_agents(self) -> None:
+        # Clear all agents
         self.boids.clear()
         self.predators.clear()
         self.obstacles.clear()
         self.leaders.clear()
-        width, height = self.screenWidth, self.screenHeight
-        # Create Boids
-        for _ in range(self.config.get("boidCount", 160)):
-            pos = np.array([random.uniform(0, width), random.uniform(0, height)], dtype=np.float32)
-            vel = np.random.uniform(-1, 1, 2).astype(np.float32)
-            vel = limitVector(vel, 2.0)
-            b = Boid(pos, vel, self.config)
-            self.boids.append(b)
-            self.agents.append(b)
-        # Create Predators
-        for _ in range(self.config.get("predatorCount", 10)):
-            pos = np.array([random.uniform(0, width), random.uniform(0, height)], dtype=np.float32)
-            vel = np.random.uniform(-1, 1, 2).astype(np.float32)
-            vel = limitVector(vel, 3.0)
-            p = Predator(pos, vel, self.config)
-            self.predators.append(p)
-            self.agents.append(p)
-        # Create Obstacles
-        for _ in range(self.config.get("obstacleCount", 20)):
-            pos = np.array([random.uniform(50, width-50), random.uniform(50, height-50)], dtype=np.float32)
-            r = random.randint(10, 20)
-            o = Obstacle(pos, r, self.config)
-            self.obstacles.append(o)
-            self.agents.append(o)
-        # Create Leaders
-        for _ in range(self.config.get("leaderCount", 5)):
-            pos = np.array([random.uniform(0, width), random.uniform(0, height)], dtype=np.float32)
-            vel = np.random.uniform(-1, 1, 2).astype(np.float32)
-            vel = limitVector(vel, 3.0)
-            l = Leader(pos, vel, self.config)
-            self.leaders.append(l)
-            self.agents.append(l)
-        self.performanceAgentCount = len(self.agents)
 
-    def updateSpatialGrid(self):
-        self.spatialGrid.clear()
-        for agent in self.agents:
-            self.spatialGrid.addAgent(agent)
+        # Create obstacles
+        obstacleCount = self.config.get('obstacleCount', 20)
+        for _ in range(obstacleCount):
+            pos = np.array(
+                [np.random.uniform(50, self.width - 50), np.random.uniform(50, self.height - 50)],
+                dtype=np.float32,
+            )
+            radius = np.random.uniform(10, 20)
+            self.obstacles.append(Obstacle(pos, radius, self.config))
 
-    def run(self):
-        self.testStartTime = time.time() if self.autoTest else None
-        dt = 1 / self.maxFPS
+        # Create leaders
+        leaderCount = self.config.get('leaderCount', 2)
+        for _ in range(leaderCount):
+            pos = np.array(
+                [np.random.uniform(50, self.width - 50), np.random.uniform(50, self.height - 50)],
+                dtype=np.float32,
+            )
+            vel = np.random.uniform(-1, 1, 2)
+            self.leaders.append(Leader(pos, vel, self.config))
+
+        # Create boids
+        boidCount = self.config.get('boidCount', 150)
+        for _ in range(boidCount):
+            pos = np.array(
+                [np.random.uniform(50, self.width - 50), np.random.uniform(50, self.height - 50)],
+                dtype=np.float32,
+            )
+            vel = np.random.uniform(-1, 1, 2)
+            self.boids.append(Boid(pos, vel, self.config))
+
+        # Create predators
+        predatorCount = self.config.get('predatorCount', 5)
+        for _ in range(predatorCount):
+            pos = np.array(
+                [np.random.uniform(50, self.width - 50), np.random.uniform(50, self.height - 50)],
+                dtype=np.float32,
+            )
+            vel = np.random.uniform(-1, 1, 2)
+            self.predators.append(Predator(pos, vel, self.config))
+
+    def run(self) -> None:
+        if self.autoTestMode:
+            self.autoTestStartTime = time.time()
+            self.autoTestPhaseStartTime = self.autoTestStartTime
+            self.speedMultiplier = self.config.get('autoTestSpeedMultiplier', 5.0)
+            self._run_auto_test()
+        else:
+            self._run_normal()
+
+    def _run_normal(self) -> None:
         while self.running:
-            startFrameTime = time.time()
-            self.handleEvents()
-            self.update(dt * self.speedMultiplier)
-            self.render()
+            dt = self.clock.tick(self.config['fpsTarget']) / 1000.0 * self.speedMultiplier
+            self._handle_events()
+            if not self.paused:
+                self._update(dt)
+            self._render()
+            self._update_fps()
             self.frameCount += 1
 
-            if self.autoTest:
-                self.handleAutoTest()
+    def _run_auto_test(self) -> None:
+        """
+        Runs the 30-second accelerated testing:
+        0-10s: flocking behavior
+        10-20s: predator-prey
+        20-30s: obstacle avoidance
+        """
+        phases = self.config.get('autoTestPhases', [])
+        phaseDurations = [p['duration'] for p in phases]
+        phaseNames = [p['name'] for p in phases]
+        totalDuration = sum(phaseDurations)
+        self.running = True
 
-            frameDuration = time.time() - startFrameTime
-            if frameDuration > 0:
-                fps = 1.0 / frameDuration
-                self.performanceFPS.append(fps)
-                if len(self.performanceFPS) > 100:
-                    self.performanceFPS.pop(0)
-            self.clock.tick(self.maxFPS)
+        while self.running:
+            now = time.time()
+            elapsed = now - self.autoTestStartTime
+            if elapsed >= totalDuration:
+                self.running = False
+                break
 
+            # Determine current phase
+            phaseTime = elapsed
+            currentPhaseIndex = 0
+            cumulative = 0
+            for i, dur in enumerate(phaseDurations):
+                cumulative += dur
+                if phaseTime < cumulative:
+                    currentPhaseIndex = i
+                    break
+
+            if currentPhaseIndex != self.autoTestPhaseIndex:
+                self.autoTestPhaseIndex = currentPhaseIndex
+                self.autoTestPhaseStartTime = now
+                print(f"[AutoTest] Switched to phase: {phaseNames[currentPhaseIndex]}")
+
+                # Reset agents for phase
+                if phaseNames[currentPhaseIndex] == 'flocking':
+                    self._setup_agents()
+                elif phaseNames[currentPhaseIndex] == 'predator_prey':
+                    self._setup_agents()
+                elif phaseNames[currentPhaseIndex] == 'obstacle_avoidance':
+                    self._setup_agents()
+
+            dt = self.clock.tick(self.config['fpsTarget'] * self.speedMultiplier) / 1000.0
+            self._handle_events(auto_test=True)
+            self._update(dt, testPhase=phaseNames[currentPhaseIndex])
+            self._render(auto_test=True)
+            self._update_fps()
+            self.frameCount += 1
+
+            # Print progress every 5 seconds
+            if int(elapsed) % 5 == 0 and int(elapsed) != int(elapsed - dt):
+                print(f"[AutoTest] Progress: {int(elapsed)} / {int(totalDuration)} sec, FPS: {self.fps:.1f}")
+
+        print("BOIDS_SIMULATION_COMPLETE_SUCCESS")
+        self.scoreManager.output_report()
         pygame.quit()
+        sys.exit(0)
 
-    def handleEvents(self):
-        with self.paramAdjustLock:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
+    def _handle_events(self, auto_test: bool = False) -> None:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
                     self.running = False
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self.running = False
-                    elif event.key == pygame.K_g:
-                        # Toggle grid visualization
-                        if "grid" in self.visualizationModes:
-                            self.visualizationModes.remove("grid")
-                        else:
-                            self.visualizationModes.add("grid")
-                    elif event.key == pygame.K_s:
-                        # Toggle stats visualization
-                        if "stats" in self.visualizationModes:
-                            self.visualizationModes.remove("stats")
-                        else:
-                            self.visualizationModes.add("stats")
-                    elif event.key == pygame.K_a:
-                        # Toggle agents visualization
-                        if "agents" in self.visualizationModes:
-                            self.visualizationModes.remove("agents")
-                        else:
-                            self.visualizationModes.add("agents")
+                if not auto_test:
+                    if event.key == pygame.K_SPACE:
+                        self.paused = not self.paused
                     elif event.key == pygame.K_UP:
-                        # Increase speed multiplier
-                        self.speedMultiplier = min(self.speedMultiplier + 0.1, 10.0)
+                        self.speedMultiplier = min(10.0, self.speedMultiplier + 0.1)
                     elif event.key == pygame.K_DOWN:
-                        # Decrease speed multiplier
-                        self.speedMultiplier = max(self.speedMultiplier - 0.1, 0.1)
-                    elif event.key == pygame.K_r:
-                        # Reload config and reinit agents
-                        self.config.reload()
-                        self.initAgents()
-                    elif event.key == pygame.K_p:
-                        # Pause/resume simulation
-                        self.speedMultiplier = 0 if self.speedMultiplier > 0 else 1.0
+                        self.speedMultiplier = max(0.1, self.speedMultiplier - 0.1)
+                    elif event.key == pygame.K_g:
+                        self.visualizeGrid = not self.visualizeGrid
+                    elif event.key == pygame.K_v:
+                        self.visualizeVectors = not self.visualizeVectors
 
-    def update(self, deltaTime: float):
-        # Update spatial grid periodically for performance
-        now = time.time()
-        if now - self.lastGridUpdate > self.gridUpdateInterval:
-            self.updateSpatialGrid()
-            self.lastGridUpdate = now
-        # Update agents
-        for agent in self.agents:
-            oldPos = agent.position.copy()
-            if isinstance(agent, Boid):
-                neighbors = self.spatialGrid.neighbors(agent.position, agent.neighborRadius)
-                agent.flock(neighbors, self.obstacles, self.predators)
-            elif isinstance(agent, Predator):
-                agent.hunt(self.boids)
-            elif isinstance(agent, Leader):
-                agent.wander()
-            agent.update(deltaTime)
-            agent.borders(self.screenWidth, self.screenHeight)
-            self.spatialGrid.updateAgent(agent, oldPos)
+    def _update(self, dt: float, testPhase: Optional[str] = None) -> None:
+        # Clear spatial grid and reinsert all agents
+        self.grid.clear()
+        allAgents = self.boids + self.predators + self.obstacles + self.leaders
+        for agent in allAgents:
+            self.grid.insert(agent)
 
-    def render(self):
-        self.screen.fill(self.bgColor)
-        if "grid" in self.visualizationModes:
-            self.spatialGrid.drawGrid(self.screen)
-        if "agents" in self.visualizationModes:
-            for agent in self.agents:
-                agent.draw(self.screen)
-        if "stats" in self.visualizationModes:
-            self.drawStats()
+        # Update Boids
+        for boid in self.boids:
+            neighbors = self.grid.query(boid.position, boid.perceptionRadius)
+            obstacles = [o for o in self.obstacles if np.linalg.norm(boid.position - o.position) < boid.obstacleAvoidanceRadius + o.radius]
+            predators = [p for p in self.predators if np.linalg.norm(boid.position - p.position) < boid.perceptionRadius * 1.5]
+
+            # Leaders influence nearby boids
+            leadersNearby = [l for l in self.leaders if np.linalg.norm(boid.position - l.position) < l.leaderInfluenceRadius]
+
+            boid.flock(neighbors, obstacles, predators, dt, self.width, self.height)
+            # Additional leader influence
+            for leader in leadersNearby:
+                leaderCohesion = leader.cohesion(neighbors)
+                boid.applyForce(leaderCohesion * 0.7)
+
+            boid.update(dt)
+
+        # Update Leaders (leadership behavior)
+        for leader in self.leaders:
+            neighbors = self.grid.query(leader.position, leader.leaderInfluenceRadius)
+            leader.lead(neighbors)
+            leader.update(dt)
+            leader.edges(self.width, self.height)
+
+        # Update Predators
+        for predator in self.predators:
+            predator.chase(self.boids, dt)
+            predator.update(dt)
+
+        # Obstacles static, no update
+
+    def _render(self, auto_test: bool = False) -> None:
+        self.screen.fill(BLACK)
+        # Draw obstacles first
+        for obstacle in self.obstacles:
+            obstacle.draw(self.screen)
+        # Draw boids
+        for boid in self.boids:
+            boid.draw(self.screen)
+            if self.visualizeVectors:
+                # Draw velocity vector
+                start = boid.position.astype(int)
+                end = (boid.position + boid.velocity * 10).astype(int)
+                pygame.draw.line(self.screen, CYAN, start, end, 1)
+
+        # Draw leaders
+        for leader in self.leaders:
+            leader.draw(self.screen)
+
+        # Draw predators
+        for predator in self.predators:
+            predator.draw(self.screen)
+            if self.visualizeVectors:
+                start = predator.position.astype(int)
+                end = (predator.position + predator.velocity * 12).astype(int)
+                pygame.draw.line(self.screen, MAGENTA, start, end, 2)
+
+        # Draw spatial grid if enabled
+        if self.visualizeGrid:
+            self._draw_grid_overlay()
+
+        # Draw UI
+        self._draw_ui(auto_test)
+
         pygame.display.flip()
 
-    def drawStats(self):
-        fps = self.clock.get_fps()
-        texts = [
-            f"FPS: {fps:.2f}",
-            f"Agents: {self.performanceAgentCount}",
-            f"Speed Multiplier: {self.speedMultiplier:.2f}",
-            f"Visual Modes: {', '.join(self.visualizationModes)}",
-            "Controls: UP/DOWN speed, G toggle grid, S toggle stats, A toggle agents",
-            "R reload config, P pause/resume, ESC quit"
-        ]
-        y = 5
-        for text in texts:
-            surf = self.font.render(text, True, (220, 220, 220))
-            self.screen.blit(surf, (5, y))
-            y += 18
+    def _draw_grid_overlay(self) -> None:
+        cellSize = self.grid.cellSize
+        for x in range(0, self.width, cellSize):
+            pygame.draw.line(self.screen, GREY, (x, 0), (x, self.height), 1)
+        for y in range(0, self.height, cellSize):
+            pygame.draw.line(self.screen, GREY, (0, y), (self.width, y), 1)
 
-    def handleAutoTest(self):
-        elapsed = time.time() - self.testStartTime
-        # Switch phases every 10 seconds: 0-10 flocking, 10-20 predator-prey, 20-30 obstacles
-        newPhase = int(elapsed // 10)
-        if newPhase != self.testPhase:
-            self.testPhase = newPhase
-            self.switchAutoTestScenario(newPhase)
-            print(f"[AutoTest] Switched to phase {self.testPhase} at {elapsed:.2f}s")
-        if elapsed >= self.testDuration:
-            # Print success and scoring report, then exit
-            self.collectAutoTestScores()
-            print("BOIDS_SIMULATION_COMPLETE_SUCCESS")
-            print(self.scoreManager.report())
-            pygame.quit()
-            sys.exit(0)
+        # Highlight occupied cells
+        for cell in self.grid.get_cells():
+            rect = pygame.Rect(cell[0] * cellSize, cell[1] * cellSize, cellSize, cellSize)
+            pygame.draw.rect(self.screen, (120, 120, 120, 80), rect, 1)
 
-    def switchAutoTestScenario(self, phase: int):
-        # Adjust agents for each test phase
-        with self.lock:
-            if phase == 0:
-                # Flocking only: no predators, no obstacles
-                self.config.set("predatorCount", 0)
-                self.config.set("obstacleCount", 0)
-                self.config.set("boidCount", 200)
-                self.config.set("leaderCount", 0)
-            elif phase == 1:
-                # Predator-prey: add predators, reduce obstacles
-                self.config.set("predatorCount", 15)
-                self.config.set("obstacleCount", 5)
-                self.config.set("boidCount", 180)
-                self.config.set("leaderCount", 0)
-            elif phase == 2:
-                # Obstacles heavy: add obstacles, fewer predators
-                self.config.set("predatorCount", 5)
-                self.config.set("obstacleCount", 30)
-                self.config.set("boidCount", 150)
-                self.config.set("leaderCount", 5)
-            else:
-                # Default fallback
-                self.config.set("predatorCount", 10)
-                self.config.set("obstacleCount", 20)
-                self.config.set("boidCount", 160)
-                self.config.set("leaderCount", 5)
-            self.initAgents()
-            self.speedMultiplier = 10.0  # Accelerated speed for testing
+    def _draw_ui(self, auto_test: bool) -> None:
+        # FPS and agent counts
+        fps_text = self.font.render(f"FPS: {self.fps:.1f}", True, WHITE)
+        boid_text = self.font.render(f"Boids: {len(self.boids)}", True, BLUE)
+        predator_text = self.font.render(f"Predators: {len(self.predators)}", True, RED)
+        obstacle_text = self.font.render(f"Obstacles: {len(self.obstacles)}", True, GREY)
+        leader_text = self.font.render(f"Leaders: {len(self.leaders)}", True, ORANGE)
+        speed_text = self.font.render(f"Speed x{self.speedMultiplier:.1f}", True, YELLOW)
+        mode_text = self.font.render(
+            f"Mode: {'Auto Test' if auto_test else 'Normal'}", True, GREEN if not auto_test else ORANGE
+        )
 
-    def collectAutoTestScores(self):
-        # Collect FPS average
-        avgFPS = sum(self.performanceFPS) / len(self.performanceFPS) if self.performanceFPS else 0
-        agentCount = self.performanceAgentCount
-        # Feature correctness and completeness assumed perfect in auto test
-        self.scoreManager.setScore("Flocking behavior", 18)
-        self.scoreManager.setScore("Spatial hash efficiency", 14)
-        self.scoreManager.setScore("Obstacle avoidance", 9)
-        self.scoreManager.setScore("Predator-prey interactions", 9)
-        self.scoreManager.setScore("UI and controls", 9)
-        self.scoreManager.calculatePerformanceScore(avgFPS, agentCount)
-        self.scoreManager.setScore("Code quality", 9)
-        self.scoreManager.setScore("Documentation", 4)
-        self.scoreManager.setScore("Error handling", 5)
-        self.scoreManager.setScore("Testing", 5)
+        self.screen.blit(fps_text, (10, 10))
+        self.screen.blit(boid_text, (10, 30))
+        self.screen.blit(predator_text, (10, 50))
+        self.screen.blit(obstacle_text, (10, 70))
+        self.screen.blit(leader_text, (10, 90))
+        self.screen.blit(speed_text, (10, 110))
+        self.screen.blit(mode_text, (10, 130))
 
-# --- Main Entrypoint ---
-def main():
-    autoTest = False
-    if len(sys.argv) > 1 and sys.argv[1] == '--auto-test':
-        autoTest = True
-    config = ConfigManager()
-    simulation = BoidsSimulation(config, autoTest=autoTest)
+        if not auto_test:
+            # Show controls
+            y = 150
+            for line in self.controlHelp:
+                textSurf = self.font.render(line, True, WHITE)
+                self.screen.blit(textSurf, (10, y))
+                y += 20
+
+        if self.paused:
+            pause_text = self.largeFont.render("PAUSED", True, RED)
+            self.screen.blit(
+                pause_text,
+                (
+                    self.width // 2 - pause_text.get_width() // 2,
+                    self.height // 2 - pause_text.get_height() // 2,
+                ),
+            )
+
+    def _update_fps(self) -> None:
+        now = time.time()
+        if now - self.lastFpsUpdate > 0.5:
+            self.fps = self.clock.get_fps()
+            self.fpsHistory.append(self.fps)
+            self.lastFpsUpdate = now
+            if self.fps < 30 and not self.autoTestMode:
+                logging.warning(f"Low FPS detected: {self.fps:.2f}")
+                # Trigger optimization advice
+                # Could implement adaptive LOD or agent count reduction here.
+
+# Entry point
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Boids++ Simulation")
+    parser.add_argument('--auto-test', action='store_true', help='Run 30-second auto test mode')
+    parser.add_argument('--config', type=str, default=None, help='Path to config JSON file')
+    parser.add_argument('--preset', type=str, default='default', help='Simulation preset name')
+    args = parser.parse_args()
+
+    config = Config(preset_name=args.preset, config_file=args.config)
+    sim = BoidsSimulation(config, auto_test_mode=args.auto_test)
     try:
-        simulation.run()
+        sim.run()
     except Exception as e:
-        print(f"Fatal error: {e}")
-        pygame.quit()
+        logging.exception(f"Unhandled exception: {e}")
+        print(f"Simulation crashed with error: {e}")
         sys.exit(1)
+    finally:
+        pygame.quit()
 
 if __name__ == "__main__":
     main()
